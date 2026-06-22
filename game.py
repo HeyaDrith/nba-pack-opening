@@ -9,6 +9,20 @@ WIDTH, HEIGHT = 1000, 800
 WIN = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("NBA Card Opening")
 
+RARITY = {
+    "common": 30,
+    "rare": 25,
+    "epic": 25,
+    "legendary": 20
+}
+
+cards_rarity = {
+    "common": [],
+    "rare": [],
+    "epic": [],
+    "legendary": []
+}
+
 # Initialize mixer after pygame.init() and attempt to load/play music
 try:
     pygame.mixer.init()
@@ -32,6 +46,9 @@ if os.path.exists(music_file):
 else:
     print("Music file not found:", music_file)
 
+open_sound = pygame.mixer.Sound('assets/openingsound.mp3')
+
+
 clock = pygame.time.Clock()
 FPS = 60
 
@@ -43,7 +60,7 @@ current_state = STATE_IDLE
 
 #ANIMATION
 shake_timer = 0
-shake_duration = 90
+shake_duration = 120
 shake_intensity = 5
 
 
@@ -60,25 +77,52 @@ pack_orig_pos = pack_rect.topleft
 card_img = None
 card_rect = pygame.Rect(0, 0, 0, 0)
 
+# Rarity state + reveal effect
+current_rarity = None
+reveal_effect_timer = 0
+reveal_effect_duration = 60
+RARITY_COLORS = {
+    'common': (140, 140, 140),
+    'rare': (0, 150, 255),
+    'epic': (170, 0, 255),
+    'legendary': (255, 200, 50)
+}
+
 def get_card_files():
     # Return image files in assets (including subdirectories) that can be used as cards
+    global cards_rarity
     exts = ('.png', '.jpg', '.jpeg')
     exclusions = {'bg.jpg', 'pack.png'}
     files = []
     try:
+        # Reset cards_rarity mapping
+        cards_rarity = {k: [] for k in cards_rarity}
         for root, _, filenames in os.walk('assets'):
             for f in filenames:
                 if f.lower() in exclusions:
                     continue
                 if f.lower().endswith(exts):
-                    files.append(os.path.join(root, f))
+                    path = os.path.join(root, f)
+                    files.append(path)
+                    # Determine rarity from immediate subfolder under assets, if present
+                    # Example: assets/common/card1.png -> rarity 'common'
+                    try:
+                        rel = os.path.normpath(os.path.relpath(root, 'assets'))
+                        parts = rel.split(os.sep)
+                        if parts and parts[0] in cards_rarity:
+                            cards_rarity[parts[0]].append(path)
+                    except Exception:
+                        # If anything goes wrong, skip categorization
+                        pass
     except Exception:
         pass
     return files
 
 
+
+
 def load_random_card():
-    global card_img, card_rect
+    global card_img, card_rect, current_rarity, reveal_effect_timer
     files = get_card_files()
     if not files:
         print('No card images found in assets; using fallback if available')
@@ -88,7 +132,34 @@ def load_random_card():
         else:
             card_img = None
             return
-    choice = random.choice(files)
+    # Choose a rarity based on weights in RARITY (values treated as weights)
+    rarities = list(RARITY.keys())
+    weights = [RARITY[r] for r in rarities]
+    try:
+        chosen_rarity = random.choices(rarities, weights=weights, k=1)[0]
+    except Exception:
+        # Fallback if weights are invalid
+        chosen_rarity = random.choice(rarities)
+
+    # Try to pick a file from the chosen rarity; if empty, fall back to any available file
+    candidate_list = cards_rarity.get(chosen_rarity, [])
+    if not candidate_list:
+        # find first non-empty rarity list
+        for rlist in cards_rarity.values():
+            if rlist:
+                candidate_list = rlist
+                break
+    # Final fallback to all files
+    if not candidate_list:
+        candidate_list = files
+
+    choice = random.choice(candidate_list)
+    print(f"Chosen rarity: {chosen_rarity} -> {choice}")
+
+    # Record current rarity and start reveal effect
+    current_rarity = chosen_rarity
+    reveal_effect_timer = reveal_effect_duration
+
     try:
         img = pygame.image.load(choice)
         img = pygame.transform.scale(img, (240, 360))
@@ -118,13 +189,26 @@ def draw():
 
     elif current_state == STATE_REVEALED:
         if card_img:
+            # Draw rarity-colored glow behind the card while the reveal effect timer is active
+            if 'reveal_effect_timer' in globals() and reveal_effect_timer > 0 and current_rarity:
+                try:
+                    glow_w = card_rect.width + 40
+                    glow_h = card_rect.height + 40
+                    glow_surf = pygame.Surface((glow_w, glow_h), pygame.SRCALPHA)
+                    color = RARITY_COLORS.get(current_rarity, (255, 255, 255))
+                    alpha = int(180 * (reveal_effect_timer / float(reveal_effect_duration)))
+                    glow_surf.fill((color[0], color[1], color[2], alpha))
+                    glow_pos = (card_rect.centerx - glow_w // 2, card_rect.centery - glow_h // 2)
+                    WIN.blit(glow_surf, glow_pos)
+                except Exception:
+                    pass
             WIN.blit(card_img, card_rect)
 
     pygame.display.update()
 
 
 def main():
-    global current_state, shake_timer
+    global current_state, shake_timer, reveal_effect_timer, current_rarity
     running = True
     while running:
         clock.tick(FPS)
@@ -140,6 +224,10 @@ def main():
                 pack_rect.topleft = pack_orig_pos
                 shake_timer = 0
 
+        # Advance reveal effect timer when revealed
+        if current_state == STATE_REVEALED and reveal_effect_timer > 0:
+            reveal_effect_timer -= 1
+
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -148,17 +236,25 @@ def main():
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     mouse_pos = pygame.mouse.get_pos()
+                else:
+                    continue
                 
                 if current_state == STATE_IDLE and pack_rect.collidepoint(mouse_pos):
                     current_state = STATE_SHAKING
                     shake_timer = 0
                     print("Shaking Started")
+                    open_sound.play()
+                    
 
                 elif current_state == STATE_REVEALED and card_rect.collidepoint(mouse_pos):
                     # Clicking the revealed card should return to idle and reset pack
                     current_state = STATE_IDLE
                     pack_rect.topleft = pack_orig_pos
+                    # reset rarity and reveal effect
+                    current_rarity = None
+                    reveal_effect_timer = 0
                     print("Revealed card clicked; pack reset")
+                    
 
 
 
